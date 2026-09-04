@@ -1,0 +1,1027 @@
+<?php
+declare(strict_types=1);
+require_once __DIR__ . '/config/db.php';
+
+header('X-Robots-Tag: noindex, nofollow', true);
+header('X-Frame-Options: SAMEORIGIN');
+header('X-Content-Type-Options: nosniff');
+header('Referrer-Policy: strict-origin-when-cross-origin');
+
+function isDesktopDevice(): bool {
+    $ua = strtolower($_SERVER['HTTP_USER_AGENT'] ?? '');
+    if ($ua === '') return true;
+    foreach (['android','iphone','ipad','ipod','blackberry','windows phone','opera mini','mobile','iemobile','webos','kindle','silk'] as $kw)
+        if (strpos($ua, $kw) !== false) return false;
+    return true;
+}
+if (!isDesktopDevice()) { http_response_code(403); exit('Desktop only'); }
+
+$settings  = getSetting($pdo);
+$siteTitle = $settings['site_name'] ?? 'Zerocastor TV';
+$siteLogo  = !empty($settings['header_logo']) ? $settings['header_logo']
+           : (!empty($settings['site_logo'])  ? $settings['site_logo']
+           : 'https://zerocastor.com/assets/newlogo.png');
+
+$user     = getLoggedInUser($pdo);
+$tvDevice = getOrCreateTvDevice($pdo, $user['id'] ?? null);
+
+$catsStmt = $pdo->query("SELECT * FROM categories ORDER BY CASE WHEN LOWER(name)='local' THEN 0 ELSE 1 END, sort_order ASC, name ASC");
+$cats     = $catsStmt->fetchAll();
+
+$channelsByCat = [];
+$allChannels   = [];
+foreach ($cats as $cat) {
+    $stmt = $pdo->prepare("SELECT c.* FROM channels c WHERE c.category_id=? AND c.status=1 ORDER BY c.sort_order ASC, c.id ASC");
+    $stmt->execute([(int)$cat['id']]);
+    $rows = $stmt->fetchAll();
+    if ($rows) {
+        $channelsByCat[(int)$cat['id']] = $rows;
+        foreach ($rows as $r) $allChannels[] = $r;
+    }
+}
+
+function js(string $v): string { return htmlspecialchars($v, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title> Zerocastor | PREMIUM TV PLATFORM</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.7.11/shaka-player.compiled.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+/* ═══════════════════ STB UI TOKENS ═══════════════════ */
+:root {
+  --bg: #000000;
+  --stb-panel: #000000; 
+  --stb-focus: #ffffff;
+  --stb-active: #0056b3; 
+  --text-primary: #ffffff;
+  --text-secondary: #cccccc;
+  --text-muted: #888888;
+  --live-red: #ff3b30;
+  --theme-blue: #007aff;
+  --sw: 420px;
+  --r: 8px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg); color: var(--text-primary); font-family: 'Outfit', sans-serif; user-select: none; }
+body { display: flex; flex-direction: column; }
+button { cursor: pointer; border: none; background: none; font-family: inherit; outline: none; }
+a { font-family: inherit; text-decoration: none; }
+img { display: block; }
+input { font-family: inherit; }
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.3); border-radius: 10px; }
+
+/* ═══════════════════ FX LAYERS ═══════════════════ */
+.fx { position: fixed; inset: 0; pointer-events: none; z-index: 2; }
+.fx-vignette { background: radial-gradient(circle at center, transparent 30%, rgba(0, 0, 0, 0.95) 100%); }
+
+/* ═══════════════════ MODERN BOOT LOADER ═══════════════════ */
+#boot {
+  position: fixed; inset: 0; z-index: 9999; display: flex;
+  background: linear-gradient(-45deg, #000000, #000b18, #000000, #001122);
+  background-size: 400% 400%; animation: gradientBG 8s ease infinite;
+  flex-direction: column; align-items: center; justify-content: center;
+  transition: opacity 1s ease, visibility 1s;
+}
+@keyframes gradientBG { 
+  0% { background-position: 0% 50%; } 
+  50% { background-position: 100% 50%; } 
+  100% { background-position: 0% 50%; } 
+}
+#boot.out { opacity: 0; visibility: hidden; pointer-events: none; }
+
+.mac-logo {
+  width: 400px; height: auto; max-height: 250px; object-fit: contain;
+  margin-bottom: 25px; transform: translateY(10px);
+  filter: drop-shadow(0 4px 20px rgba(0, 122, 255, 0.15));
+}
+
+/* iOS Native Typography Stack */
+.mac-welcome-text {
+  text-align: center;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  margin-bottom: 40px; 
+  animation: fadeInText 2s ease-out forwards;
+}
+
+.mac-hello {
+  font-size: 26px;
+  font-weight: 600;
+  color: #ffffff;
+  letter-spacing: 1px;
+  margin-bottom: 6px;
+}
+
+.mac-welcome {
+  font-size: 14px;
+  font-weight: 500;
+  color: #d2d2d7; 
+  letter-spacing: 2.5px;
+  margin-bottom: 6px;
+}
+
+.mac-premium {
+  font-size: 11px;
+  font-weight: 400;
+  color: #86868b; 
+  letter-spacing: 3px;
+}
+
+@keyframes fadeInText {
+  0% { opacity: 0; transform: translateY(10px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+.mac-progress-track {
+  width: 240px; height: 4px; background: rgba(255,255,255,0.1);
+  border-radius: 10px; overflow: hidden;
+}
+
+.mac-progress-fill {
+  height: 100%; width: 0%; background: #ffffff;
+  border-radius: 10px; transition: width 10s linear;
+  box-shadow: 0 0 10px rgba(255,255,255,0.5);
+}
+
+/* ═══════════════════ APP SHELL ═══════════════════ */
+#shell { flex: 1; display: flex; overflow: hidden; position: relative; z-index: 10; opacity: 0; transition: opacity 1s ease; }
+#shell.on { opacity: 1; }
+
+/* ═══════════════════ SIDEBAR (MENU) ═══════════════════ */
+.scrim { position: fixed; inset: 0; z-index: 500; background: rgba(0,0,0,0.8); backdrop-filter: blur(5px); opacity: 0; pointer-events: none; transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1); }
+.scrim.on { opacity: 1; pointer-events: auto; }
+
+.sb {
+  position: fixed; top: 0; left: 0; bottom: 0; width: var(--sw); z-index: 510;
+  transform: translateX(-100%); transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
+  display: flex; flex-direction: column; background: var(--stb-panel); 
+  border-right: 2px solid #222; 
+}
+.sb.on { transform: translateX(0); }
+
+/* Sidebar Header - Full Logo */
+.sb-head { padding: 32px; border-bottom: 2px solid #222; flex-shrink: 0; display: flex; justify-content: center; }
+.sb-brand img { max-width: 100%; height: 80px; object-fit: contain; }
+
+.sb-acct { margin-top: 24px; background: #111; border-radius: var(--r); padding: 20px; border: 1px solid #333; }
+.sb-uname { font-size: 18px; font-weight: 600; color: #fff; }
+.sb-umob { font-size: 14px; color: #aaa; margin-top: 4px; }
+.dev-pill { margin-top: 16px; display: flex; align-items: center; justify-content: space-between; background: #000; border: 1px solid #333; border-radius: 6px; padding: 12px 16px; }
+.dev-lbl { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #888; }
+.dev-code { font-family: 'JetBrains Mono', monospace; font-size: 20px; font-weight: 700; color: #fff; letter-spacing: 4px; }
+
+.sb-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+.btn { height: 44px; border-radius: 6px; font-size: 14px; font-weight: 600; display: flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.2s; border: 2px solid transparent; }
+.btn:hover, .btn:focus { transform: scale(1.05); border-color: #fff; }
+.btn-blue { background: #fff; color: #000; }
+.btn-red { background: #331111; color: var(--live-red); border: 1px solid #551111; }
+
+/* STB Sidebar Body */
+.sb-body { flex: 1; overflow-y: auto; padding: 24px 32px; }
+.cat-row { 
+  display: flex; align-items: center; justify-content: space-between; 
+  font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700; 
+  letter-spacing: 2px; color: #fff; text-transform: uppercase; 
+  background: #1a1a1a; padding: 10px 16px; border-radius: 4px; margin-bottom: 12px; 
+}
+.ch-grid { display: flex; flex-direction: column; gap: 6px; margin-bottom: 32px; }
+
+/* Classic STB TV Guide Channel Items */
+.chi {
+  display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-radius: 4px;
+  background: #0a0a0a; border: 2px solid #222; cursor: pointer; transition: all 0.15s ease;
+}
+.chi:hover, .chi:focus { background: #222; border-color: #fff; transform: scale(1.02); outline: none; }
+.chi.on { background: var(--stb-active); border-color: #fff; transform: scale(1.02); box-shadow: 0 4px 15px rgba(0,0,0,0.6); }
+
+.chi-logo { width: 50px; height: 50px; border-radius: 4px; background: #000; display: flex; align-items: center; justify-content: center; flex-shrink: 0; border: 1px solid #333; }
+.chi-logo img { width: 80%; height: 80%; object-fit: contain; }
+.chi-meta { flex: 1; min-width: 0; text-align: left; }
+.chi-name { font-size: 18px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chi-num { font-family: 'JetBrains Mono', monospace; font-size: 14px; color: #aaa; margin-top: 4px; }
+.chi.on .chi-num { color: #ddd; }
+
+/* Login/Reg fields */
+.atabs { display: flex; gap: 8px; margin-top: 16px; }
+.atab { flex: 1; height: 44px; border-radius: 6px; font-size: 14px; font-weight: 600; background: #222; color: #aaa; }
+.atab.on { background: #fff; color: #000; }
+.apane { display: none; margin-top: 16px; }
+.apane.on { display: block; }
+.field { margin-bottom: 16px; }
+.field label { display: block; font-size: 12px; color: #aaa; margin-bottom: 8px; text-transform: uppercase; font-weight: 700; }
+.field input { width: 100%; height: 50px; border-radius: 6px; border: 2px solid #333; background: #000; color: #fff; padding: 0 16px; font-size: 16px; outline: none; transition: all 0.2s; }
+.field input:focus { border-color: #fff; background: #111; }
+.amsg { font-size: 14px; color: #fff; margin-top: 12px; text-align: center; }
+.amsg.err { color: var(--live-red); }
+
+/* ═══════════════════ MAIN STAGE ═══════════════════ */
+.stage { flex: 1; position: relative; background: #000; overflow: hidden; }
+#vid { width: 100%; height: 100%; object-fit: contain; background: #000; display: block; }
+#vid::-webkit-media-controls { display: none !important; }
+
+/* ═══════════════════ HUD (ON-SCREEN DISPLAY) ═══════════════════ */
+.hud-top, .hud-bot { position: absolute; left: 0; right: 0; z-index: 400; transition: opacity 0.4s ease, transform 0.4s ease; }
+.hud-top { top: 0; background: linear-gradient(to bottom, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0.4) 60%, transparent 100%); padding: 40px 50px 80px; }
+.hud-bot { bottom: 0; background: linear-gradient(to top, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0.4) 60%, transparent 100%); padding: 80px 50px 40px; }
+.hud-top.hide { opacity: 0; transform: translateY(-20px); pointer-events: none; }
+.hud-bot.hide { opacity: 0; transform: translateY(20px); pointer-events: none; }
+
+.hud-tr { display: flex; align-items: flex-start; justify-content: space-between; width: 100%; }
+
+/* Now Playing - TOP LEFT */
+.hud-tl { display: flex; flex-direction: column; text-align: left; }
+.hud-now { display: flex; flex-direction: column; justify-content: center; text-shadow: 0 2px 10px rgba(0,0,0,0.8); }
+.hud-now-lbl { font-size: 14px; font-weight: 600; color: var(--theme-blue); text-transform: uppercase; letter-spacing: 2px; margin-bottom: 4px; }
+.hud-now-name { font-size: 42px; font-weight: 700; max-width: 600px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.1; color: #fff;}
+
+/* Clock - TOP RIGHT */
+.hud-clock-area { text-align: right; text-shadow: 0 4px 20px rgba(0,0,0,0.8); }
+.hud-clock { font-size: 64px; font-weight: 300; line-height: 1; letter-spacing: -1px; color: #fff; }
+.hud-date { font-family: 'JetBrains Mono', monospace; font-size: 16px; color: #ccc; margin-top: 8px; text-transform: uppercase; letter-spacing: 2px; }
+
+/* Controls - BOTTOM RIGHT */
+.hud-br { display: flex; align-items: flex-end; justify-content: flex-end; width: 100%; }
+.hud-ctrl { display: flex; align-items: center; gap: 16px; }
+
+/* Watermark - BOTTOM LEFT */
+.watermark { position: absolute; left: 50px; bottom: 80px; z-index: 80; pointer-events: none; opacity: 1; }
+.watermark img { height: 50px; max-width: 250px; object-fit: contain; }
+
+/* Large STB Buttons */
+.hbtn {
+  width: 64px; height: 64px; border-radius: 50%;
+  background: rgba(0,0,0,0.7); border: 2px solid rgba(255,255,255,0.2);
+  color: #fff; font-size: 24px; display: flex; align-items: center; justify-content: center;
+  backdrop-filter: blur(20px); transition: all 0.2s;
+}
+.hbtn:hover, .hbtn:focus {
+  background: rgba(255,255,255,0.2); border-color: #fff;
+  box-shadow: 0 0 20px rgba(255,255,255,0.3); transform: scale(1.1);
+}
+.hbtn.on { background: #fff; color: #000; }
+
+/* Fixed Fullscreen Sidebar Toggle Button */
+.side-toggle-btn {
+  position: absolute; top: 50%; left: 0; transform: translateY(-50%);
+  z-index: 9999; 
+  width: 44px; height: 120px;
+  background: rgba(0, 15, 30, 0.9); border: 2px solid rgba(0, 122, 255, 0.4); border-left: none;
+  border-radius: 0 16px 16px 0; color: #fff; font-size: 28px;
+  display: flex; align-items: center; justify-content: center;
+  backdrop-filter: blur(15px); transition: all 0.3s ease;
+  opacity: 0; pointer-events: none; cursor: pointer;
+  box-shadow: 5px 0 15px rgba(0,0,0,0.6);
+}
+.side-toggle-btn.show { opacity: 1; pointer-events: auto; }
+.side-toggle-btn:hover { background: rgba(0, 122, 255, 0.2); width: 54px; border-color: #fff; color: #fff; }
+
+/* Volume Block STB style */
+.vol-block { display: flex; align-items: center; gap: 16px; height: 64px; padding: 0 24px; border-radius: 32px; background: rgba(0,0,0,0.7); border: 2px solid rgba(255,255,255,0.2); backdrop-filter: blur(20px); }
+.vol-ico { font-size: 24px; color: #fff; }
+.vol-track { width: 140px; height: 6px; background: rgba(255,255,255,0.2); border-radius: 10px; position: relative; cursor: pointer; }
+.vol-fill { height: 100%; border-radius: 10px; background: var(--theme-blue); pointer-events: none; }
+.vol-knob { position: absolute; top: 50%; transform: translate(50%,-50%); width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 0 10px rgba(0,0,0,0.8); pointer-events: none; }
+.vol-pct { font-family: 'JetBrains Mono', monospace; font-size: 16px; font-weight: 700; min-width: 40px; text-align: right; color: #fff; }
+
+/* ═══════════════════ TV CHANNEL BANNER (OSD) ═══════════════════ */
+.ch-banner {
+  position: absolute; bottom: 160px; left: 50px; z-index: 450;
+  display: flex; align-items: center; gap: 24px;
+  background: linear-gradient(90deg, rgba(0,0,0,0.95), rgba(0,0,0,0.5));
+  border-left: 6px solid var(--theme-blue); padding: 20px 40px 20px 24px; border-radius: 0 8px 8px 0;
+  backdrop-filter: blur(20px); box-shadow: 0 10px 40px rgba(0,0,0,0.8);
+  opacity: 0; transform: translateX(-40px); pointer-events: none;
+  transition: all 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.ch-banner.on { opacity: 1; transform: translateX(0); }
+.cb-logo { width: 80px; height: 80px; border-radius: 8px; background: #000; border: 1px solid #333; display: flex; align-items: center; justify-content: center; flex-shrink: 0; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+.cb-logo img { width: 75%; height: 75%; object-fit: contain; }
+.cb-lbl { font-size: 14px; font-weight: 600; color: #ccc; text-transform: uppercase; letter-spacing: 3px; margin-bottom: 4px; }
+.cb-name { font-size: 42px; font-weight: 700; line-height: 1; color: #fff; text-shadow: 0 2px 10px rgba(0,0,0,0.8); }
+.cb-num { font-family: 'JetBrains Mono', monospace; font-size: 18px; color: var(--theme-blue); margin-top: 8px; }
+
+/* ═══════════════════ REAL TV VIBE LOADING ═══════════════════ */
+.chl { position: absolute; inset: 0; z-index: 500; display: none; background: #000; }
+.chl.on { display: block; }
+.chl-osd { position: absolute; top: 50px; right: 50px; display: flex; flex-direction: column; align-items: flex-end; text-align: right; text-shadow: 0 2px 8px #000; animation: fadeIn 0.3s ease-out; }
+.chl-osd-logo { width: 100px; height: 100px; border-radius: 8px; background: #111; border: 1px solid #333; object-fit: contain; margin-bottom: 16px; padding: 10px; }
+.chl-osd-num { font-family: 'JetBrains Mono', monospace; font-size: 56px; font-weight: 700; color: #fff; line-height: 1; }
+.chl-osd-name { font-size: 28px; font-weight: 600; color: #ccc; margin-top: 8px; text-transform: uppercase; letter-spacing: 2px; }
+.chl-center { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); display: flex; flex-direction: column; align-items: center; }
+.chl-spinner-icon { font-size: 56px; color: rgba(0, 122, 255, 0.4); animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+/* ═══════════════════ VOLUME OSD (TV Style) ═══════════════════ */
+.vol-osd {
+  position: absolute; right: 50px; top: 50%; transform: translateY(-50%) translateX(20px); z-index: 450;
+  background: rgba(0,0,0,0.8); border: 2px solid rgba(255,255,255,0.2); border-radius: 20px;
+  padding: 30px 20px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  backdrop-filter: blur(20px); opacity: 0; pointer-events: none; transition: all 0.3s;
+}
+.vol-osd.on { opacity: 1; transform: translateY(-50%) translateX(0); }
+.vol-osd-ico { font-size: 32px; color: #fff; margin-bottom: 20px; }
+.vol-osd-bar { width: 8px; height: 200px; background: rgba(255,255,255,0.2); border-radius: 10px; display: flex; align-items: flex-end; overflow: hidden; }
+.vol-osd-fill { width: 100%; background: var(--theme-blue); border-radius: 10px; transition: height 0.1s; box-shadow: 0 0 15px rgba(0, 122, 255, 0.5); }
+.vol-osd-num { font-family: 'JetBrains Mono', monospace; font-size: 20px; font-weight: 700; color: #fff; margin-top: 20px; }
+
+/* ═══════════════════ ERROR ═══════════════════ */
+#errBox {
+  display: none; position: absolute; bottom: 180px; left: 50%; transform: translateX(-50%); z-index: 600;
+  width: 400px; max-width: 90vw; background: rgba(20, 0, 0, 0.95); border: 2px solid var(--live-red);
+  border-radius: 8px; padding: 32px; text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,0.9); backdrop-filter: blur(20px);
+}
+#errTitle { font-size: 24px; font-weight: 700; color: var(--live-red); margin-bottom: 8px; }
+#errText { font-size: 16px; color: #ccc; }
+#errBox .btn { margin: 24px auto 0; min-width: 140px; display: inline-flex; }
+</style>
+</head>
+<body oncontextmenu="return false;">
+<div class="fx fx-vignette"></div>
+
+<div id="boot">
+  <img class="mac-logo" src="<?= e($siteLogo) ?>" alt="TV Logo">
+  
+  <div class="mac-welcome-text">
+    <div class="mac-hello">HELLO.</div>
+    <div class="mac-welcome">WELCOME BACK ZEROCASTOR TV.</div>
+    <div class="mac-premium">YOUR PREMIUM TELEVISION PLATFORM.</div>
+  </div>
+
+  <div class="mac-progress-track">
+    <div class="mac-progress-fill" id="macProgressFill"></div>
+  </div>
+</div>
+
+<div id="shell">
+  <div class="scrim" id="scrim" onclick="sbClose()"></div>
+
+  <aside class="sb" id="sb" tabindex="-1">
+    <div class="sb-head">
+      <div class="sb-brand">
+        <img src="<?= e($siteLogo) ?>" alt="Logo">
+      </div>
+    </div>
+    
+    <div class="sb-body" style="padding-top: 0;">
+      <div class="sb-acct" style="margin-top: 10px; margin-bottom: 24px;">
+        <?php if ($user): ?>
+          <div class="sb-uname"><?= e($user['display_name']) ?></div>
+          <div class="sb-umob"><?= e($user['mobile']) ?></div>
+          <div class="dev-pill">
+            <div><div class="dev-lbl">PAIRING CODE</div></div>
+            <div class="dev-code"><?= e($tvDevice['device_code']) ?></div>
+          </div>
+          <div class="sb-btns">
+            <a class="btn btn-blue" href="remote.php" target="_blank"><i class="bi bi-phone"></i> Remote</a>
+            <button class="btn btn-red" onclick="doLogout()"><i class="bi bi-power"></i> Logout</button>
+          </div>
+        <?php else: ?>
+          <div class="sb-uname">Link Remote</div>
+          <div class="sb-umob">Sync mobile app for full control.</div>
+          <div class="dev-pill">
+            <div><div class="dev-lbl">TV CODE</div></div>
+            <div class="dev-code"><?= e($tvDevice['device_code']) ?></div>
+          </div>
+          <div class="atabs">
+            <button class="atab on" onclick="authTab('login')">Login</button>
+            <button class="atab" onclick="authTab('reg')">Register</button>
+          </div>
+          <div class="apane on" id="pL">
+            <div class="field"><label>Mobile</label><input type="text" id="lM" placeholder="Enter Mobile"></div>
+            <div class="field"><label>PIN / Password</label><input type="password" id="lP" placeholder="••••••"></div>
+            <button class="btn btn-blue" style="width:100%" onclick="doLogin()">Authenticate</button>
+            <div class="amsg" id="lMsg"></div>
+          </div>
+          <div class="apane" id="pR">
+            <div class="field"><label>Name</label><input type="text" id="rN" placeholder="Household Name"></div>
+            <div class="field"><label>Mobile</label><input type="text" id="rM" placeholder="Enter Mobile"></div>
+            <div class="field"><label>PIN / Password</label><input type="password" id="rP" placeholder="••••••"></div>
+            <button class="btn btn-blue" style="width:100%" onclick="doReg()">Register TV</button>
+            <div class="amsg" id="rMsg"></div>
+          </div>
+        <?php endif; ?>
+      </div>
+
+      <?php foreach ($cats as $cat):
+        $cid = (int)$cat['id'];
+        if (empty($channelsByCat[$cid])) continue;
+      ?>
+        <div class="cat-row"><span><?= e($cat['name']) ?></span><span><?= count($channelsByCat[$cid]) ?> CH</span></div>
+        <div class="ch-grid">
+          <?php foreach ($channelsByCat[$cid] as $ch): ?>
+            <button class="chi"
+              data-id="<?= (int)$ch['id'] ?>"
+              onclick="switchCh(<?= (int)$ch['id'] ?>,'<?= js((string)$ch['channel_name']) ?>','<?= js((string)$ch['channel_image']) ?>')"
+            >
+              <div class="chi-logo"><img src="<?= e((string)$ch['channel_image']) ?>" alt="<?= e((string)$ch['channel_name']) ?>" loading="lazy"></div>
+              <div class="chi-meta">
+                <div class="chi-name"><?= e((string)$ch['channel_name']) ?></div>
+                <div class="chi-num">CH <?= (int)$ch['id'] ?></div>
+              </div>
+            </button>
+          <?php endforeach; ?>
+        </div>
+      <?php endforeach; ?>
+    </div>
+  </aside>
+
+  <button id="sideToggleBtn" class="side-toggle-btn" onclick="sbToggle()" title="Menu">
+    <i class="bi bi-chevron-right"></i>
+  </button>
+
+  <main class="stage" id="stage">
+    <video id="vid" autoplay playsinline preload="auto"
+      disablepictureinpicture
+      controlslist="nodownload noplaybackrate nofullscreen noremoteplayback">
+    </video>
+
+    <div class="hud-top" id="hudT">
+      <div class="hud-tr">
+        <div class="hud-tl">
+          <div class="hud-now">
+            <span class="hud-now-lbl">NOW PLAYING</span>
+            <span class="hud-now-name" id="hudName">—</span>
+          </div>
+        </div>
+        <div class="hud-clock-area">
+          <div class="hud-clock" id="hudClock">00:00</div>
+          <div class="hud-date" id="hudDate"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="hud-bot" id="hudB">
+      <div class="hud-br">
+        <div class="hud-ctrl">
+          <button class="hbtn" onclick="prevCh()" title="Prev (←)"><i class="bi bi-caret-left-fill"></i></button>
+          <button class="hbtn" onclick="nextCh()" title="Next (→)"><i class="bi bi-caret-right-fill"></i></button>
+          
+          <div class="vol-block" style="margin-left: 16px;">
+            <i class="bi bi-volume-up vol-ico" id="volIco"></i>
+            <div class="vol-track" id="volTrack">
+              <div class="vol-fill" id="volFill" style="width:100%"></div>
+              <div class="vol-knob" id="volKnob" style="right:0%"></div>
+            </div>
+            <span class="vol-pct" id="volPct">100</span>
+          </div>
+          <button class="hbtn" id="muteBtn" onclick="toggleMute()" title="Mute (M)"><i class="bi bi-volume-mute-fill"></i></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="watermark"><img src="<?= e($siteLogo) ?>" alt=""></div>
+
+    <div class="ch-banner" id="chBanner">
+      <div class="cb-logo"><img id="cbLogo" src="" alt=""></div>
+      <div>
+        <div class="cb-lbl">Tuning to</div>
+        <div class="cb-name" id="cbName">—</div>
+        <div class="cb-num" id="cbNum">CH 0</div>
+      </div>
+    </div>
+
+    <div class="vol-osd" id="volOsd">
+      <div class="vol-osd-ico" id="vOsdIco"><i class="bi bi-volume-up-fill"></i></div>
+      <div class="vol-osd-bar"><div class="vol-osd-fill" id="vOsdFill" style="height:100%"></div></div>
+      <div class="vol-osd-num" id="vOsdNum">100</div>
+    </div>
+
+    <div class="chl" id="chl">
+      <div class="chl-osd">
+        <img id="chlLogo" class="chl-osd-logo" src="" alt="">
+        <div class="chl-osd-num" id="chlNum">0</div>
+        <div class="chl-osd-name" id="chlName">Loading</div>
+      </div>
+      <div class="chl-center">
+        <i class="bi bi-arrow-repeat chl-spinner-icon"></i>
+      </div>
+    </div>
+
+    <div id="errBox">
+      <div id="errTitle"><i class="bi bi-exclamation-triangle-fill"></i> Signal Lost</div>
+      <div id="errText">Could not connect to broadcast stream.</div>
+      <button class="btn btn-blue" onclick="retryCh()"><i class="bi bi-arrow-clockwise"></i> Retry Connection</button>
+    </div>
+  </main>
+</div>
+
+<script>
+/* ══════════════════════════════════
+   SECURITY & ANTI-INSPECTION
+══════════════════════════════════ */
+document.addEventListener('contextmenu', e => e.preventDefault());
+document.addEventListener('keydown', e => {
+  if (e.keyCode === 123) { e.preventDefault(); return false; } 
+  if (e.ctrlKey && e.shiftKey && (e.keyCode === 73 || e.keyCode === 74 || e.keyCode === 67)) { 
+    e.preventDefault(); return false; 
+  }
+  if (e.ctrlKey && e.keyCode === 85) { e.preventDefault(); return false; } 
+});
+setInterval(function() { Function('debugger')(); }, 500);
+
+/* ══════════════════════════════════
+   CONFIG & STATE
+══════════════════════════════════ */
+const DEF_ID   = 1; // Strict default Channel ID
+const BOOT_MS  = 10000; // Exactly 10 Seconds as requested
+const CHS      = <?= json_encode(array_values(array_map(fn($c)=>['id'=>(int)$c['id'],'name'=>(string)$c['channel_name'],'logo'=>(string)$c['channel_image']], $allChannels)), JSON_UNESCAPED_SLASHES) ?>;
+
+let player=null, curId=DEF_ID, curName='', curLogo='';
+let curVol=1.0;
+let isMuted=true; // START MUTED FOR BOOTING
+let fallbackMuted = false; 
+let isSwitching=false, loadToken=0, retries=0;
+const MAX_RET=8;
+let bootDone=false, vidReady=false, recovering=false;
+let uiT=null, sbT=null, banT=null, vOsdT=null;
+let isDragVol=false;
+
+const sleep = ms => new Promise(r=>setTimeout(r,ms));
+
+/* ══════════════════════════════════
+   BOOT & AUTO FULLSCREEN ENFORCEMENT
+══════════════════════════════════ */
+function goFullscreen() {
+  const el = document.documentElement;
+  if (!document.fullscreenElement && el.requestFullscreen) {
+    el.requestFullscreen().catch(err => console.log('Fullscreen interaction required'));
+  }
+}
+
+// AGGRESSIVE FULLSCREEN: Every click forces fullscreen natively
+document.addEventListener('click', () => {
+    goFullscreen();
+    const vid = document.getElementById('vid');
+    if (vid && vid.paused) { vid.play().catch(()=>{}); }
+    
+    if (fallbackMuted && bootDone) {
+        isMuted = false;
+        fallbackMuted = false;
+        applyVol();
+    }
+});
+
+function startTvBoot() {
+  goFullscreen();
+  
+  // Force mute state visually at the start
+  isMuted = true;
+  applyVol();
+  
+  const bootScreen = document.getElementById('boot');
+  
+  // Trigger Apple-style progress bar animation
+  setTimeout(() => {
+      const fill = document.getElementById('macProgressFill');
+      if(fill) fill.style.width = '100%';
+  }, 50);
+
+  // PRE-LOAD Channel 2 silently in the background
+  const startCh = getCh(DEF_ID) || CHS[0];
+  if(startCh) {
+      curId = startCh.id;
+      // keepLoader = true hides the black channel loader UI behind the boot screen
+      startPlayer(startCh.id, false, true).catch(()=>{});
+  }
+
+  // Exactly after 10 seconds, drop the boot screen and UNMUTE
+  setTimeout(() => {
+    bootDone = true;
+    bootScreen.classList.add('out');
+    document.getElementById('shell').classList.add('on');
+    
+    const vid = document.getElementById('vid');
+
+    // AUTO UNMUTE LOGIC
+    isMuted = false;
+    applyVol();
+    
+    if (vid) { 
+        vid.play().catch(()=>{
+             // If browser strictly blocked the auto-unmute play attempt without click:
+             console.warn("Auto-unmute blocked by browser, waiting for user interaction.");
+             isMuted = true; 
+             fallbackMuted = true;
+             applyVol();
+             vid.play().catch(()=>{});
+        }); 
+    }
+    
+    setTimeout(()=> bootScreen.style.display = 'none', 1000);
+    showUi();
+  }, BOOT_MS);
+}
+
+/* ══════════════════════════════════
+   CLOCK
+══════════════════════════════════ */
+function tickClock() {
+  const n=new Date();
+  const H=String(n.getHours()).padStart(2,'0'), M=String(n.getMinutes()).padStart(2,'0');
+  const D=['SUN','MON','TUE','WED','THU','FRI','SAT'][n.getDay()];
+  const Mo=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][n.getMonth()];
+  document.getElementById('hudClock').textContent=H+':'+M;
+  document.getElementById('hudDate').textContent=D+', '+n.getDate()+' '+Mo;
+}
+
+/* ══════════════════════════════════
+   UI VISIBILITY
+══════════════════════════════════ */
+function showUi() {
+  ['hudT','hudB', 'sideToggleBtn'].forEach(id=>{
+      let el = document.getElementById(id);
+      if(el) {
+          if(id === 'sideToggleBtn') el.classList.add('show');
+          else el.classList.remove('hide');
+      }
+  });
+  
+  if (uiT) clearTimeout(uiT);
+  uiT = setTimeout(()=>{
+    if (!document.getElementById('sb').classList.contains('on')) {
+      ['hudT','hudB', 'sideToggleBtn'].forEach(id=>{
+        let el = document.getElementById(id);
+        if(el) {
+            if(id === 'sideToggleBtn') el.classList.remove('show');
+            else el.classList.add('hide');
+        }
+      });
+    }
+  }, 5000);
+}
+
+/* ══════════════════════════════════
+   SIDEBAR
+══════════════════════════════════ */
+function sbOpen() {
+  document.getElementById('sb').classList.add('on');
+  document.getElementById('scrim').classList.add('on');
+  const toggleBtn = document.getElementById('sideToggleBtn');
+  toggleBtn.innerHTML = '<i class="bi bi-chevron-left"></i>';
+  
+  setTimeout(() => {
+    let activeCh = document.querySelector('.chi.on');
+    if(activeCh) activeCh.focus();
+  }, 400);
+  if (sbT) clearTimeout(sbT);
+  sbT=setTimeout(sbClose, 12000);
+  showUi();
+}
+function sbClose() {
+  document.getElementById('sb').classList.remove('on');
+  document.getElementById('scrim').classList.remove('on');
+  document.getElementById('sideToggleBtn').innerHTML = '<i class="bi bi-chevron-right"></i>';
+  document.getElementById('vid').focus();
+}
+function sbToggle() {
+  document.getElementById('sb').classList.contains('on') ? sbClose() : sbOpen();
+}
+
+/* ══════════════════════════════════
+   AUTH
+══════════════════════════════════ */
+function authTab(t) {
+  document.querySelectorAll('.atab').forEach((el,i)=>el.classList.toggle('on',(t==='login'&&i===0)||(t!=='login'&&i===1)));
+  document.getElementById('pL').classList.toggle('on',t==='login');
+  document.getElementById('pR').classList.toggle('on',t!=='login');
+}
+async function postAuth(body) {
+  const r=await fetch('api/auth.php',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});
+  return r.json();
+}
+async function doLogin() {
+  const m=document.getElementById('lMsg'); m.className='amsg'; m.textContent='Logging in...';
+  try {
+    const j=await postAuth('action=login&mobile='+encodeURIComponent(document.getElementById('lM').value)+'&password='+encodeURIComponent(document.getElementById('lP').value));
+    if(j.status==='ok'){m.textContent='Success! Reloading...';setTimeout(()=>location.reload(),500);}
+    else{m.className='amsg err';m.textContent=j.message||'Login failed';}
+  }catch(e){m.className='amsg err';m.textContent='Network error';}
+}
+async function doReg() {
+  const m=document.getElementById('rMsg'); m.className='amsg'; m.textContent='Registering...';
+  try {
+    const j=await postAuth('action=register&name='+encodeURIComponent(document.getElementById('rN').value)+'&mobile='+encodeURIComponent(document.getElementById('rM').value)+'&password='+encodeURIComponent(document.getElementById('rP').value));
+    if(j.status==='ok'){m.textContent='Done! Reloading...';setTimeout(()=>location.reload(),500);}
+    else{m.className='amsg err';m.textContent=j.message||'Failed';}
+  }catch(e){m.className='amsg err';m.textContent='Network error';}
+}
+async function doLogout() {
+  try{await fetch('api/auth.php',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'action=logout'});}catch(e){}
+  location.reload();
+}
+
+/* ══════════════════════════════════
+   CHANNEL HELPERS
+══════════════════════════════════ */
+const getCh  = id=>CHS.find(c=>c.id===parseInt(id))||null;
+const idxOf  = id=>CHS.findIndex(c=>c.id===parseInt(id));
+const nextId = ()=>{ const i=idxOf(curId); return CHS.length?CHS[(i+1)%CHS.length].id:curId; };
+const prevId = ()=>{ const i=idxOf(curId); return CHS.length?CHS[(i-1+CHS.length)%CHS.length].id:curId; };
+
+function setActiveUi(id,name,logo) {
+  curId=parseInt(id); curName=name||('CH '+id); curLogo=logo||'';
+  document.getElementById('hudName').textContent=curName;
+  document.querySelectorAll('.chi').forEach(el=>el.classList.toggle('on',parseInt(el.dataset.id)===curId));
+}
+
+/* ══════════════════════════════════
+   LOADERS
+══════════════════════════════════ */
+function showChl(id,name,logo) {
+  const logoEl = document.getElementById('chlLogo');
+  if (logo) {
+      logoEl.src = logo;
+      logoEl.style.display = 'block';
+  } else {
+      logoEl.style.display = 'none';
+  }
+  document.getElementById('chlNum').textContent=id;
+  document.getElementById('chlName').textContent=name||('CH '+id);
+  document.getElementById('chl').classList.add('on');
+  document.getElementById('errBox').style.display='none';
+}
+function hideChl(){ document.getElementById('chl').classList.remove('on'); }
+
+function showBanner(id,name,logo) {
+  document.getElementById('cbLogo').src=logo||'';
+  document.getElementById('cbName').textContent=name||('CH '+id);
+  document.getElementById('cbNum').textContent='CH '+id;
+  const el=document.getElementById('chBanner');
+  el.classList.add('on');
+  if(banT) clearTimeout(banT);
+  banT=setTimeout(()=>el.classList.remove('on'),4000);
+}
+function showErr(txt) {
+  hideChl();
+  document.getElementById('errText').textContent=txt||'Stream failed.';
+  document.getElementById('errBox').style.display='block';
+}
+
+/* ══════════════════════════════════
+   VOLUME
+══════════════════════════════════ */
+function applyVol() {
+  const vid=document.getElementById('vid');
+  vid.volume=Math.max(0,Math.min(1,curVol));
+  vid.muted=isMuted;
+
+  const pct = isMuted?0:Math.round(curVol*100);
+  const pctS = pct+'%';
+
+  document.getElementById('volFill').style.width = pctS;
+  const knobRight = isMuted ? 100 : (1-curVol)*100;
+  document.getElementById('volKnob').style.right = knobRight+'%';
+  document.getElementById('volPct').textContent  = pct;
+
+  const ico=document.getElementById('volIco');
+  ico.className = pct===0 ? 'bi bi-volume-mute vol-ico'
+                : pct<50  ? 'bi bi-volume-down vol-ico'
+                :           'bi bi-volume-up vol-ico';
+
+  document.getElementById('muteBtn').classList.toggle('on',isMuted);
+
+  document.getElementById('vOsdFill').style.height=pctS;
+  document.getElementById('vOsdNum').textContent=pct;
+  document.getElementById('vOsdIco').innerHTML = pct===0
+    ? '<i class="bi bi-volume-mute-fill"></i>'
+    : '<i class="bi bi-volume-up-fill"></i>';
+  const osd=document.getElementById('volOsd');
+  osd.classList.add('on');
+  if(vOsdT) clearTimeout(vOsdT);
+  vOsdT=setTimeout(()=>osd.classList.remove('on'),2500);
+  showUi();
+}
+
+function setVol(v){ curVol=Math.max(0,Math.min(1,v)); if(curVol>0) isMuted=false; applyVol(); }
+function volUp()  { setVol(curVol+0.10); }
+function volDown(){ setVol(curVol-0.10); }
+function toggleMute(){ isMuted=!isMuted; applyVol(); }
+
+function volFromEvt(e) {
+  const r=document.getElementById('volTrack').getBoundingClientRect();
+  const x=(e.clientX||(e.touches&&e.touches[0]?.clientX)||0)-r.left;
+  return Math.max(0,Math.min(1, x/r.width));
+}
+function setupVol() {
+  const t=document.getElementById('volTrack');
+  const start=e=>{ isDragVol=true; isMuted=false; setVol(volFromEvt(e)); };
+  const move =e=>{ if(isDragVol){ isMuted=false; setVol(volFromEvt(e)); }};
+  const end  =()=>{ isDragVol=false; };
+  t.addEventListener('mousedown', e=>{ e.preventDefault(); start(e); });
+  t.addEventListener('touchstart', start, {passive:true});
+  document.addEventListener('mousemove', move);
+  document.addEventListener('touchmove', move, {passive:true});
+  document.addEventListener('mouseup', end);
+  document.addEventListener('touchend', end);
+}
+
+/* ══════════════════════════════════
+   PLAYER CORE
+══════════════════════════════════ */
+async function killPlayer() {
+  if(player){ try{await player.destroy();}catch(e){} player=null; }
+  const v=document.getElementById('vid');
+  try{ v.pause(); }catch(e){}
+  v.removeAttribute('src');
+  try{ v.load(); }catch(e){}
+}
+
+async function fetchData(id) {
+  const r=await fetch('api/player-data.php?id='+encodeURIComponent(id)+'&t='+Date.now(),{cache:'no-store'});
+  if(!r.ok) throw new Error('HTTP '+r.status);
+  const j=await r.json();
+  if(j.status!=='ok') throw new Error(j.message||'API error');
+  if(!j.stream?.manifest) throw new Error('No manifest URL');
+  return j;
+}
+
+async function loadOnce(id, token) {
+  const j=await fetchData(id);
+  if(token!==loadToken) throw new Error('stale');
+
+  const s=j.stream;
+  await killPlayer();
+  if(token!==loadToken) throw new Error('stale');
+
+  const vid=document.getElementById('vid');
+  shaka.polyfill.installAll();
+  player=new shaka.Player(vid);
+
+  player.configure({
+    streaming:{
+      bufferingGoal:30,rebufferingGoal:4,bufferBehind:15,
+      stallEnabled:true,stallThreshold:1,stallSkip:0.1,
+      retryParameters:{maxAttempts:10,baseDelay:1000,backoffFactor:2,fuzzFactor:0.5,timeout:20000}
+    },
+    manifest:{retryParameters:{maxAttempts:10,baseDelay:1000,backoffFactor:2,fuzzFactor:0.5,timeout:20000}}
+  });
+
+  if(s.widevine && s.license) {
+    player.configure({drm:{servers:{'com.widevine.alpha':s.license},retryParameters:{maxAttempts:5,baseDelay:1000,backoffFactor:2,fuzzFactor:0.5,timeout:10000}}});
+  }
+
+  player.addEventListener('error', ev=>{
+    if(token!==loadToken) return;
+    if(retries<MAX_RET){ retries++; startPlayer(curId,true,true).catch(()=>{}); }
+    else showErr('Playback error ('+((ev.detail?.code)||'?')+')');
+  });
+
+  await player.load(s.manifest);
+  if(token!==loadToken) throw new Error('stale');
+
+  // Video will be muted here during the initial 10s boot!
+  vid.muted=isMuted;
+  vid.volume=curVol;
+
+  try {
+    await vid.play();
+  } catch (e) {
+    console.warn('Autoplay blocked. Ensuring muted state for boot process.');
+    vid.muted = true;
+    isMuted = true;
+    fallbackMuted = true;
+    applyVol();
+    try { await vid.play(); } catch (e2) { console.error('Hard playback fail:', e2); }
+  }
+  retries=0;
+}
+
+async function startPlayer(id, isRetry=false, keepLoader=false) {
+  const ch=getCh(id);
+  if(!ch){ showErr('Channel not found'); return false; }
+
+  const token=++loadToken;
+  isSwitching=true;
+  setActiveUi(ch.id,ch.name,ch.logo);
+  document.getElementById('errBox').style.display='none';
+  if(!keepLoader) showChl(ch.id,ch.name,ch.logo);
+  if(!isRetry) retries=0;
+
+  let lastErr=null;
+  for(let attempt=0; attempt<MAX_RET; attempt++){
+    try{
+      await loadOnce(ch.id,token);
+      if(token!==loadToken) return false;
+      syncCh(ch.id);
+      isSwitching=false;
+      return true;
+    }catch(e){
+      lastErr=e;
+      if(e.message==='stale'||token!==loadToken) return false;
+      await sleep(Math.min(600*(attempt+1),4000));
+    }
+  }
+  isSwitching=false;
+  showErr('Stream failed — check connection.');
+  return false;
+}
+
+/* ══════════════════════════════════
+   CHANNEL SWITCH
+══════════════════════════════════ */
+async function switchCh(id,name,logo){
+  sbClose(); 
+  if(parseInt(id)===curId&&player){ showUi(); return; }
+  setActiveUi(id,name||curName,logo||curLogo);
+  showBanner(id,name,logo);
+  showUi();
+  const ok=await startPlayer(parseInt(id),false,false);
+  if(ok){ hideChl(); }
+}
+async function nextCh(){ const c=getCh(nextId()); if(c) await switchCh(c.id,c.name,c.logo); }
+async function prevCh(){ const c=getCh(prevId()); if(c) await switchCh(c.id,c.name,c.logo); }
+async function retryCh(){ await startPlayer(curId,false,false); }
+
+/* ══════════════════════════════════
+   VIDEO EVENTS
+══════════════════════════════════ */
+function markReady(){ 
+  vidReady=true; 
+  if(bootDone) hideChl(); 
+}
+
+async function tryRecover(){
+  if(recovering||isSwitching) return;
+  recovering=true;
+  try{ await startPlayer(curId,true,!bootDone); }catch(e){}finally{ recovering=false; }
+}
+
+/* ══════════════════════════════════
+   SYNC
+══════════════════════════════════ */
+async function syncCh(id){ try{await fetch('api/tv-sync.php',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'action=set_channel&channel_id='+encodeURIComponent(id)});}catch(e){} }
+async function pollRemote(){
+  try{
+    const r=await fetch('api/tv-sync.php?action=poll&t='+Date.now(),{cache:'no-store'});
+    const j=await r.json();
+    if(j.status==='ok'&&Array.isArray(j.commands)){
+      for(const c of j.commands){
+        switch(c.command_name){
+          case 'channel': if(c.payload_text){const ch=getCh(parseInt(c.payload_text));if(ch) await switchCh(ch.id,ch.name,ch.logo);} break;
+          case 'next': await nextCh(); break;
+          case 'prev': await prevCh(); break;
+          case 'volume_up': volUp(); break;
+          case 'volume_down': volDown(); break;
+          case 'mute': toggleMute(); break;
+        }
+      }
+    }
+  }catch(e){}
+}
+
+/* ══════════════════════════════════
+   INIT
+══════════════════════════════════ */
+document.addEventListener('DOMContentLoaded', async ()=>{
+  const vid=document.getElementById('vid');
+  vid.removeAttribute('controls');
+
+  tickClock(); setInterval(tickClock, 10000);
+  setupVol();
+  
+  // Start the 10-second STB Boot Loader automatically
+  startTvBoot();
+
+  vid.addEventListener('loadeddata', markReady);
+  vid.addEventListener('canplay',    markReady);
+  vid.addEventListener('playing', ()=>{ markReady(); document.getElementById('errBox').style.display='none'; hideChl(); });
+  vid.addEventListener('pause',  ()=>{ if(!isSwitching) setTimeout(()=>vid.play().catch(()=>{}),100); });
+  vid.addEventListener('stalled',()=>tryRecover());
+  vid.addEventListener('error',  ()=>tryRecover());
+
+  document.addEventListener('mousemove', showUi);
+
+  document.addEventListener('keydown', async e=>{
+    if(e.target.tagName==='INPUT') return;
+    switch(e.key){
+      case 'ArrowRight': e.preventDefault(); await nextCh(); break;
+      case 'ArrowLeft':  e.preventDefault(); await prevCh(); break;
+      case 'ArrowUp':    e.preventDefault(); volUp(); break;
+      case 'ArrowDown':  e.preventDefault(); volDown(); break;
+      case 'm': case 'M': toggleMute(); break;
+      case 'Enter':
+      case ' ': e.preventDefault(); if(!document.getElementById('sb').classList.contains('on')) sbToggle(); break;
+      case 'Escape': sbClose(); break;
+    }
+    showUi();
+  });
+
+  const sb=document.getElementById('sb');
+  sb.addEventListener('mouseenter',()=>{ if(sbT){clearTimeout(sbT);sbT=null;} });
+  sb.addEventListener('mouseleave',()=>{ sbT=setTimeout(sbClose,8000); }); 
+
+  setInterval(pollRemote, 1800);
+  setInterval(()=>fetch('api/tv-sync.php',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'action=heartbeat'}).catch(()=>{}), 15000);
+});
+</script>
+</body>
+</html>
